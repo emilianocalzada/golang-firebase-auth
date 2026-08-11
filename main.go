@@ -10,9 +10,11 @@ import (
 	"context"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	_ "github.com/mattn/go-sqlite3"
+	"golang.org/x/time/rate"
 )
 
 func main() {
@@ -55,18 +57,46 @@ func main() {
 	// Configure the routes
 	r := gin.Default()
 
+	// Client IP resolution. gin trusts every proxy by default, which means any
+	// caller could set X-Forwarded-For and become whoever they like in the
+	// access log and in anything keyed on IP. See ConfigureClientIP.
+	if err := transport.ConfigureClientIP(r, cfg.TrustedProxies, cfg.ClientIPHeader); err != nil {
+		log.Fatal(err)
+	}
+
+	// Rate limits, per authenticated Firebase UID.
+	//
+	// The refresh bucket is the tight one: every call is a RevenueCat API
+	// request we pay for, and the app only needs it after a purchase, a
+	// restore, or a cold start that looks stale. The group bucket is a
+	// backstop against a client looping on any /v1 route.
+	refreshLimiter := transport.NewUserRateLimiter(transport.RateLimitConfig{
+		Rate:  rate.Every(10 * time.Second),
+		Burst: 5,
+	})
+	groupLimiter := transport.NewUserRateLimiter(transport.RateLimitConfig{
+		Rate:  5,
+		Burst: 20,
+	})
+
 	r.GET("/healthz", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
 
 	// Server to server: authenticated by the RevenueCat shared secret, so it
-	// stays outside the Firebase-authenticated group.
+	// stays outside the Firebase-authenticated group. Deliberately not rate
+	// limited: dropping a delivery costs a customer their entitlement until a
+	// retry lands, and the shared secret already bounds who can reach it.
 	revenueCatHandler.RegisterRoutes(r)
 
-	// Everything under /v1 needs a valid Firebase ID token.
-	v1 := r.Group("/v1", authMiddleware.RequireAuth())
+	// Everything under /v1 needs a valid Firebase ID token, and the limiter
+	// sits behind RequireAuth because it keys on the verified UID.
+	v1 := r.Group("/v1", authMiddleware.RequireAuth(), groupLimiter.Middleware())
 	userHandler.RegisterRoutes(v1)
 	bookHandler.RegisterRoutes(v1)
+	// POST /v1/me/premium/refresh: the app's recovery path when a webhook is
+	// lost, and what it calls right after a purchase or a restore.
+	revenueCatHandler.RegisterUserRoutes(v1, refreshLimiter.Middleware())
 
 	// Start listening
 	log.Printf("aislide api listening on :%s (db: %s, entitlement: %s)", cfg.Port, cfg.DatabasePath, cfg.RevenueCatEntitlementID)

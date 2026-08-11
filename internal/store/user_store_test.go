@@ -148,53 +148,41 @@ func TestUpsertPremiumPreservesCreatedAt(t *testing.T) {
 	}
 }
 
-func TestRecordEventIsIdempotent(t *testing.T) {
+func TestHasEventReportsWhatWasRecorded(t *testing.T) {
 	events := store.NewRevenueCatEventStore(newTestDB(t))
 	ctx := context.Background()
 
-	isNew, err := events.RecordEvent(ctx, "evt-1")
+	seen, err := events.HasEvent(ctx, "evt-1")
 	if err != nil {
+		t.Fatalf("HasEvent: %v", err)
+	}
+	if seen {
+		t.Fatal("an unrecorded event must not be reported as processed")
+	}
+
+	if err := events.RecordEvent(ctx, "evt-1"); err != nil {
 		t.Fatalf("RecordEvent: %v", err)
 	}
-	if !isNew {
-		t.Fatal("first RecordEvent should report the event as new")
-	}
 
-	isNew, err = events.RecordEvent(ctx, "evt-1")
-	if err != nil {
-		t.Fatalf("second RecordEvent: %v", err)
+	if seen, err := events.HasEvent(ctx, "evt-1"); err != nil || !seen {
+		t.Errorf("evt-1: seen = %v, err = %v, want true", seen, err)
 	}
-	if isNew {
-		t.Error("replayed event should not be reported as new")
-	}
-
-	// A different id is still new.
-	if isNew, err := events.RecordEvent(ctx, "evt-2"); err != nil || !isNew {
-		t.Errorf("evt-2: isNew = %v, err = %v", isNew, err)
+	// An unrelated id is unaffected.
+	if seen, err := events.HasEvent(ctx, "evt-2"); err != nil || seen {
+		t.Errorf("evt-2: seen = %v, err = %v, want false", seen, err)
 	}
 }
 
-func TestDeleteEventAllowsReprocessing(t *testing.T) {
+func TestRecordEventTwiceIsNotAnError(t *testing.T) {
+	// Two deliveries of the same event can race and both reach the end of the
+	// work, so recording an id that is already there must not fail.
 	events := store.NewRevenueCatEventStore(newTestDB(t))
 	ctx := context.Background()
 
-	if _, err := events.RecordEvent(ctx, "evt-retry"); err != nil {
-		t.Fatalf("RecordEvent: %v", err)
+	if err := events.RecordEvent(ctx, "evt-same"); err != nil {
+		t.Fatalf("first RecordEvent: %v", err)
 	}
-	if err := events.DeleteEvent(ctx, "evt-retry"); err != nil {
-		t.Fatalf("DeleteEvent: %v", err)
-	}
-
-	isNew, err := events.RecordEvent(ctx, "evt-retry")
-	if err != nil {
-		t.Fatalf("RecordEvent after delete: %v", err)
-	}
-	if !isNew {
-		t.Error("event should be processable again after DeleteEvent")
-	}
-
-	// Deleting an unknown id is not an error.
-	if err := events.DeleteEvent(ctx, "never-seen"); err != nil {
-		t.Errorf("DeleteEvent unknown: %v", err)
+	if err := events.RecordEvent(ctx, "evt-same"); err != nil {
+		t.Errorf("second RecordEvent: %v", err)
 	}
 }

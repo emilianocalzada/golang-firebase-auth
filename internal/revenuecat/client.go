@@ -3,6 +3,7 @@ package revenuecat
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -18,6 +19,16 @@ const (
 	// maxPages stops us from following a pagination cursor forever.
 	maxPages = 20
 )
+
+// ErrCustomerNotFound means RevenueCat has no customer with that App User ID.
+//
+// What it implies is up to the caller. For the customer an event is about, or
+// for someone refreshing their own state, it is a real error: a wrong project id
+// answers 404 too, and reading that as "no entitlement" would downgrade every
+// paying customer at once. For the losing side of a transfer it is safe to read
+// as "no entitlement", because a customer RevenueCat does not have cannot own
+// one.
+var ErrCustomerNotFound = errors.New("revenuecat customer not found")
 
 // Client reads the authoritative entitlement state from the RevenueCat v2 API.
 // The webhook only says something changed; this says what is true.
@@ -129,10 +140,13 @@ func (c *Client) fetchActiveEntitlements(ctx context.Context, appUserID, startin
 	}
 	defer res.Body.Close()
 
-	// Every non-200 is an error, including 404. A webhook always names a
-	// customer RevenueCat knows, so a 404 here means the project id is wrong
-	// rather than "no entitlement" - failing loudly beats silently downgrading
-	// paying customers to free.
+	// Every non-200 is an error. 404 gets its own sentinel so a caller that can
+	// safely treat "no such customer" as "no entitlement" is able to say so,
+	// while everyone else keeps failing loudly: a wrong project id answers 404
+	// as well, and that must never downgrade paying customers to free.
+	if res.StatusCode == http.StatusNotFound {
+		return nil, fmt.Errorf("%w: %s: status 404%s", ErrCustomerNotFound, appUserID, describeError(res.Body))
+	}
 	if res.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("revenuecat returned status %d%s", res.StatusCode, describeError(res.Body))
 	}

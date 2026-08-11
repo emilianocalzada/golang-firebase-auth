@@ -3,17 +3,19 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"time"
 )
 
 // RevenueCatEventStore gives the webhook idempotency: RevenueCat retries
-// deliveries, so we remember which event ids we already handled.
+// deliveries, so we remember which event ids we have finished processing.
 type RevenueCatEventStore interface {
-	// RecordEvent stores the event id and reports whether it was new. A false
-	// return means this is a retry of an event we already processed.
-	RecordEvent(ctx context.Context, eventID string) (bool, error)
-	// DeleteEvent forgets an event so a RevenueCat retry can process it again.
-	DeleteEvent(ctx context.Context, eventID string) error
+	// HasEvent reports whether this event id was already processed to
+	// completion.
+	HasEvent(ctx context.Context, eventID string) (bool, error)
+	// RecordEvent marks the event id as processed. It is called only after the
+	// work it acknowledges succeeded, and is safe to call more than once.
+	RecordEvent(ctx context.Context, eventID string) error
 }
 
 type revenueCatEventStore struct {
@@ -24,26 +26,27 @@ func NewRevenueCatEventStore(db *sql.DB) RevenueCatEventStore {
 	return &revenueCatEventStore{db: db}
 }
 
-func (s *revenueCatEventStore) RecordEvent(ctx context.Context, eventID string) (bool, error) {
-	q := `INSERT OR IGNORE INTO revenuecat_events (event_id, received_at) VALUES (?, ?)`
+func (s *revenueCatEventStore) HasEvent(ctx context.Context, eventID string) (bool, error) {
+	q := `SELECT 1 FROM revenuecat_events WHERE event_id = ?`
 
-	resp, err := s.db.ExecContext(ctx, q, eventID, formatTime(time.Now().UTC()))
+	var found int
+	err := s.db.QueryRowContext(ctx, q, eventID).Scan(&found)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
 	if err != nil {
 		return false, err
 	}
 
-	inserted, err := resp.RowsAffected()
-	if err != nil {
-		return false, err
-	}
-
-	return inserted > 0, nil
+	return true, nil
 }
 
-func (s *revenueCatEventStore) DeleteEvent(ctx context.Context, eventID string) error {
-	q := `DELETE FROM revenuecat_events WHERE event_id = ?`
+func (s *revenueCatEventStore) RecordEvent(ctx context.Context, eventID string) error {
+	// OR IGNORE: two deliveries of the same event racing each other both do the
+	// work and both try to record it, which is safe rather than an error.
+	q := `INSERT OR IGNORE INTO revenuecat_events (event_id, received_at) VALUES (?, ?)`
 
-	_, err := s.db.ExecContext(ctx, q, eventID)
+	_, err := s.db.ExecContext(ctx, q, eventID, formatTime(time.Now().UTC()))
 
 	return err
 }

@@ -1,0 +1,28 @@
+# Keeps secrets out of the build context and stops unrelated file changes from
+# busting the layer cache. COPY . . in the Dockerfile would otherwise pull all
+# of this into the build stage, and a secret baked into any layer has leaked
+# even when the final stage only copies the binary out.
+
+.git
+.gitignore
+.dockerignore
+Dockerfile
+*.md
+
+# Credentials. These must arrive at runtime as environment variables or mounts.
+.env
+.env.*
+*-firebase-adminsdk-*.json
+serviceAccountKey.json
+
+# Local SQLite databases: the container gets its own in the mounted volume.
+*.db
+*.db-shm
+*.db-wal
+
+# Build output
+/aislide
+/api
+
+.DS_Store
+**/.DS_Store

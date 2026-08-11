@@ -3,6 +3,7 @@ package revenuecat_test
 import (
 	"aislide/internal/revenuecat"
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -192,18 +193,36 @@ func TestPremiumStatusStopsEarlyWhenFound(t *testing.T) {
 	}
 }
 
-func TestPremiumStatus404IsAnError(t *testing.T) {
+func TestPremiumStatus404IsATypedError(t *testing.T) {
 	// A wrong project id also answers 404, so treating it as "no entitlement"
-	// would silently downgrade every paying customer.
+	// would silently downgrade every paying customer. It is reported as a
+	// sentinel instead, so only the callers that can act on it do.
 	client := stubAPI(t, http.StatusNotFound, `{"type":"resource_missing","message":"Resource not found","object":"error"}`)
 
 	_, _, err := client.PremiumStatus(context.Background(), "uid-1")
 	if err == nil {
 		t.Fatal("404 should be an error")
 	}
+	if !errors.Is(err, revenuecat.ErrCustomerNotFound) {
+		t.Errorf("err = %v, want it to match ErrCustomerNotFound", err)
+	}
 	// The RevenueCat error detail should make it into the message.
 	if !strings.Contains(err.Error(), "resource_missing") || !strings.Contains(err.Error(), "404") {
 		t.Errorf("err = %v, want it to mention the status and type", err)
+	}
+}
+
+func TestPremiumStatusOtherErrorsAreNotCustomerNotFound(t *testing.T) {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusTooManyRequests, http.StatusInternalServerError} {
+		client := stubAPI(t, status, `{"message":"nope"}`)
+
+		_, _, err := client.PremiumStatus(context.Background(), "uid-1")
+		if err == nil {
+			t.Fatalf("status %d should be an error", status)
+		}
+		if errors.Is(err, revenuecat.ErrCustomerNotFound) {
+			t.Errorf("status %d must not look like a missing customer, or a transient outage would revoke premium", status)
+		}
 	}
 }
 

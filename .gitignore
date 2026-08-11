@@ -11,3 +11,6 @@ serviceAccountKey.json
 # Build output
 /aislide
 /api
+
+# macOS
+.DS_Store

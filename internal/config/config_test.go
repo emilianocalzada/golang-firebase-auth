@@ -36,6 +36,7 @@ func clearEnv(t *testing.T) {
 		"FIREBASE_PROJECT_ID", "FIREBASE_CREDENTIALS_FILE",
 		"REVENUECAT_SECRET_API_KEY", "REVENUECAT_PROJECT_ID",
 		"REVENUECAT_WEBHOOK_AUTH", "REVENUECAT_ENTITLEMENT_ID",
+		"TRUSTED_PROXIES", "CLIENT_IP_HEADER",
 	}
 	for _, key := range keys {
 		t.Setenv(key, "")
@@ -190,6 +191,102 @@ func TestRequiredValues(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tc.wantMessage) {
 				t.Errorf("err = %v, want it to mention %s", err, tc.wantMessage)
+			}
+		})
+	}
+}
+
+func TestLoadDefaultsToTrustingNoProxy(t *testing.T) {
+	clearEnv(t)
+	writeEnvFile(t, minimalEnv)
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	// Nothing trusted and no header read: the client IP is the socket peer,
+	// which is what a local run without a proxy should see.
+	if len(cfg.TrustedProxies) != 0 {
+		t.Errorf("TrustedProxies = %v, want empty", cfg.TrustedProxies)
+	}
+	if cfg.ClientIPHeader != "" {
+		t.Errorf("ClientIPHeader = %q, want empty", cfg.ClientIPHeader)
+	}
+}
+
+func TestLoadParsesCloudflareProxySetup(t *testing.T) {
+	clearEnv(t)
+	writeEnvFile(t, minimalEnv+
+		"TRUSTED_PROXIES=172.16.0.0/12, 10.0.0.0/8 ,192.168.1.7\n"+
+		"CLIENT_IP_HEADER=CF-Connecting-IP\n")
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	want := []string{"172.16.0.0/12", "10.0.0.0/8", "192.168.1.7"}
+	if len(cfg.TrustedProxies) != len(want) {
+		t.Fatalf("TrustedProxies = %v, want %v", cfg.TrustedProxies, want)
+	}
+	for i, entry := range want {
+		if cfg.TrustedProxies[i] != entry {
+			t.Errorf("TrustedProxies[%d] = %q, want %q", i, cfg.TrustedProxies[i], entry)
+		}
+	}
+	if cfg.ClientIPHeader != "CF-Connecting-IP" {
+		t.Errorf("ClientIPHeader = %q, want CF-Connecting-IP", cfg.ClientIPHeader)
+	}
+}
+
+func TestLoadRejectsBadProxyTrust(t *testing.T) {
+	cases := []struct {
+		name  string
+		extra string
+		want  string
+	}{
+		{
+			// Trusting every source makes the header spoofable by anyone who
+			// reaches the origin directly.
+			name:  "trust all ipv4",
+			extra: "TRUSTED_PROXIES=0.0.0.0/0\n",
+			want:  "0.0.0.0/0",
+		},
+		{
+			name:  "trust all ipv6",
+			extra: "TRUSTED_PROXIES=::/0\n",
+			want:  "::/0",
+		},
+		{
+			name:  "typo",
+			extra: "TRUSTED_PROXIES=172.16.0.0/99\n",
+			want:  "not a valid CIDR",
+		},
+		{
+			name:  "not an ip",
+			extra: "TRUSTED_PROXIES=traefik\n",
+			want:  "not a valid IP address or CIDR",
+		},
+		{
+			// The header would silently never be read.
+			name:  "header without proxies",
+			extra: "CLIENT_IP_HEADER=CF-Connecting-IP\n",
+			want:  "would be ignored",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			clearEnv(t)
+			writeEnvFile(t, minimalEnv+tc.extra)
+
+			_, err := config.Load()
+			if err == nil {
+				t.Fatal("Load should have failed")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %q, want it to mention %q", err, tc.want)
 			}
 		})
 	}
