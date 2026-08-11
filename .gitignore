@@ -1,0 +1,13 @@
+# Service account keys - never commit these
+*-firebase-adminsdk-*.json
+serviceAccountKey.json
+.env
+
+# Local SQLite databases
+*.db
+*.db-shm
+*.db-wal
+
+# Build output
+/aislide
+/api
