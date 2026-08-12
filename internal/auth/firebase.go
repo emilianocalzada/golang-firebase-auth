@@ -33,17 +33,32 @@ type firebaseVerifier struct {
 	client *firebaseauth.Client
 }
 
-// NewFirebaseVerifier builds a verifier from a service account JSON file.
-// Pass an empty credentialsFile to fall back to Application Default
-// Credentials (how this will run on a cloud host).
-func NewFirebaseVerifier(ctx context.Context, projectID, credentialsFile string) (Verifier, error) {
+// Credentials says where the service account comes from. Exactly one field
+// should be set, or neither to fall back to Application Default Credentials.
+//
+// JSON exists for hosts whose only way to inject a secret is an environment
+// variable. It is the same document as the file, just carried inline.
+type Credentials struct {
+	File string
+	JSON []byte
+}
+
+// NewFirebaseVerifier builds a verifier from a service account, supplied either
+// as a file path or as the JSON itself. Pass an empty Credentials to fall back
+// to Application Default Credentials (only available on a Google cloud host).
+func NewFirebaseVerifier(ctx context.Context, projectID string, creds Credentials) (Verifier, error) {
 	var opts []option.ClientOption
-	if credentialsFile != "" {
-		// WithAuthCredentialsFile pins the accepted credential type instead of
-		// loading whatever the file happens to contain. option.WithCredentialsFile
-		// is deprecated because it also accepts external_account configs, which
-		// can point at arbitrary URLs or local executables to fetch a token.
-		opts = append(opts, option.WithAuthCredentialsFile(option.ServiceAccount, credentialsFile))
+
+	// Both variants pin the accepted credential type instead of loading
+	// whatever the document happens to contain. The plain WithCredentialsFile
+	// and WithCredentialsJSON are deprecated because they also accept
+	// external_account configs, which can point at arbitrary URLs or local
+	// executables to fetch a token.
+	switch {
+	case len(creds.JSON) > 0:
+		opts = append(opts, option.WithAuthCredentialsJSON(option.ServiceAccount, creds.JSON))
+	case creds.File != "":
+		opts = append(opts, option.WithAuthCredentialsFile(option.ServiceAccount, creds.File))
 	}
 
 	app, err := firebase.NewApp(ctx, &firebase.Config{ProjectID: projectID}, opts...)

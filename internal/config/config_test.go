@@ -2,6 +2,7 @@ package config_test
 
 import (
 	"aislide/internal/config"
+	"encoding/base64"
 	"os"
 	"path/filepath"
 	"strings"
@@ -33,7 +34,7 @@ func clearEnv(t *testing.T) {
 
 	keys := []string{
 		"PORT", "DATABASE_PATH",
-		"FIREBASE_PROJECT_ID", "FIREBASE_CREDENTIALS_FILE",
+		"FIREBASE_PROJECT_ID", "FIREBASE_CREDENTIALS_FILE", "FIREBASE_CREDENTIALS_JSON",
 		"REVENUECAT_SECRET_API_KEY", "REVENUECAT_PROJECT_ID",
 		"REVENUECAT_WEBHOOK_AUTH", "REVENUECAT_ENTITLEMENT_ID",
 		"TRUSTED_PROXIES", "CLIENT_IP_HEADER",
@@ -287,6 +288,113 @@ func TestLoadRejectsBadProxyTrust(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("error = %q, want it to mention %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// serviceAccountEnv is a syntactically valid service account document. The key
+// is fake but shaped right: parseCredentialsJSON only checks structure.
+const serviceAccountEnv = `{"type":"service_account","project_id":"p",` +
+	`"private_key":"-----BEGIN PRIVATE KEY-----\nMIIBfake\n-----END PRIVATE KEY-----\n",` +
+	`"client_email":"sa@p.iam.gserviceaccount.com"}`
+
+func TestLoadAcceptsInlineCredentialsJSON(t *testing.T) {
+	clearEnv(t)
+	writeEnvFile(t, minimalEnv)
+	t.Setenv("FIREBASE_CREDENTIALS_JSON", serviceAccountEnv)
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if string(cfg.FirebaseCredentialsJSON) != serviceAccountEnv {
+		t.Errorf("FirebaseCredentialsJSON = %q, want the document verbatim", cfg.FirebaseCredentialsJSON)
+	}
+}
+
+func TestLoadAcceptsBase64CredentialsJSON(t *testing.T) {
+	clearEnv(t)
+	writeEnvFile(t, minimalEnv)
+	t.Setenv("FIREBASE_CREDENTIALS_JSON", base64.StdEncoding.EncodeToString([]byte(serviceAccountEnv)))
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	// Decoded, so the SDK receives the same bytes either way.
+	if string(cfg.FirebaseCredentialsJSON) != serviceAccountEnv {
+		t.Errorf("FirebaseCredentialsJSON = %q, want the decoded document", cfg.FirebaseCredentialsJSON)
+	}
+}
+
+func TestLoadRejectsBadCredentialsJSON(t *testing.T) {
+	credentials := filepath.Join(t.TempDir(), "sa.json")
+	if err := os.WriteFile(credentials, []byte("{}"), 0600); err != nil {
+		t.Fatalf("write credentials: %v", err)
+	}
+
+	cases := []struct {
+		name string
+		json string
+		file string
+		want string
+	}{
+		{
+			name: "truncated paste",
+			json: `{"type":"service_account","project_id":"p"`,
+			want: "not valid JSON",
+		},
+		{
+			name: "not json and not base64",
+			json: "paste-went-wrong!!",
+			want: "nor valid base64",
+		},
+		{
+			name: "wrong credential type",
+			json: `{"type":"external_account","project_id":"p","private_key":"x\ny","client_email":"a@b"}`,
+			want: "want service_account",
+		},
+		{
+			name: "missing fields",
+			json: `{"type":"service_account"}`,
+			want: "missing project_id",
+		},
+		{
+			// The commonest paste failure: \n escapes flattened away.
+			name: "private key lost its newlines",
+			json: `{"type":"service_account","project_id":"p","private_key":"-----BEGIN PRIVATE KEY-----MIIBfake-----END PRIVATE KEY-----","client_email":"a@b"}`,
+			want: "no line breaks",
+		},
+		{
+			name: "both sources set",
+			json: serviceAccountEnv,
+			file: credentials,
+			want: "not both",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			clearEnv(t)
+			writeEnvFile(t, minimalEnv)
+			t.Setenv("FIREBASE_CREDENTIALS_JSON", tc.json)
+			if tc.file != "" {
+				t.Setenv("FIREBASE_CREDENTIALS_FILE", tc.file)
+			}
+
+			_, err := config.Load()
+			if err == nil {
+				t.Fatal("Load should have failed")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %q, want it to mention %q", err, tc.want)
+			}
+			// An error that echoed the document would put a private key in the
+			// logs of whatever is watching startup.
+			if strings.Contains(err.Error(), "PRIVATE KEY") {
+				t.Errorf("error must not include the credential contents: %q", err)
 			}
 		})
 	}

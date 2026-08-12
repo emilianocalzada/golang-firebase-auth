@@ -37,7 +37,10 @@ func main() {
 	}
 
 	// Firebase ID token verification
-	verifier, err := auth.NewFirebaseVerifier(ctx, cfg.FirebaseProjectID, cfg.FirebaseCredentialsFile)
+	verifier, err := auth.NewFirebaseVerifier(ctx, cfg.FirebaseProjectID, auth.Credentials{
+		File: cfg.FirebaseCredentialsFile,
+		JSON: cfg.FirebaseCredentialsJSON,
+	})
 	if err != nil {
 		log.Fatal(err)
 	}

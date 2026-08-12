@@ -23,7 +23,7 @@ func TestFirebaseVerifier(t *testing.T) {
 
 	ctx := context.Background()
 
-	verifier, err := auth.NewFirebaseVerifier(ctx, projectID, credentialsFile)
+	verifier, err := auth.NewFirebaseVerifier(ctx, projectID, auth.Credentials{File: credentialsFile})
 	if err != nil {
 		t.Fatalf("NewFirebaseVerifier: %v", err)
 	}

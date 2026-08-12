@@ -1,6 +1,8 @@
 package config
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -21,8 +23,13 @@ const minWebhookSecretLength = 16
 //	PORT                       HTTP port                        (default 8000)
 //	DATABASE_PATH              SQLite file                      (default ./aislide.db)
 //	FIREBASE_PROJECT_ID        Firebase project id              (required)
-//	FIREBASE_CREDENTIALS_FILE  Service account JSON path        (optional, falls
-//	                           back to Application Default Credentials)
+//	FIREBASE_CREDENTIALS_FILE  Service account JSON path        (optional)
+//	FIREBASE_CREDENTIALS_JSON  Service account JSON inline,     (optional)
+//	                           raw or base64. Use this instead
+//	                           of the file on hosts whose only
+//	                           secret store is the environment.
+//	                           With neither, Application Default
+//	                           Credentials are used.
 //	REVENUECAT_SECRET_API_KEY  RevenueCat v2 secret API key     (required)
 //	REVENUECAT_PROJECT_ID      RevenueCat project id            (required)
 //	REVENUECAT_WEBHOOK_AUTH    Full Authorization header value  (required)
@@ -37,6 +44,10 @@ type Config struct {
 	DatabasePath            string
 	FirebaseProjectID       string
 	FirebaseCredentialsFile string
+	// FirebaseCredentialsJSON is the service account document itself, for
+	// deployments that can only inject secrets as environment variables. Never
+	// log it: it holds a private key.
+	FirebaseCredentialsJSON []byte
 	RevenueCatSecretAPIKey  string
 	RevenueCatProjectID     string
 	RevenueCatWebhookAuth   string
@@ -75,6 +86,18 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("FIREBASE_PROJECT_ID is required (set it in .env or the environment)")
 	}
 
+	credentialsJSON, err := parseCredentialsJSON(os.Getenv("FIREBASE_CREDENTIALS_JSON"))
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.FirebaseCredentialsJSON = credentialsJSON
+
+	// Both set is ambiguous, and picking one silently is how you end up
+	// authenticating as a project you did not mean to.
+	if len(cfg.FirebaseCredentialsJSON) > 0 && cfg.FirebaseCredentialsFile != "" {
+		return Config{}, fmt.Errorf("set FIREBASE_CREDENTIALS_FILE or FIREBASE_CREDENTIALS_JSON, not both")
+	}
+
 	if cfg.FirebaseCredentialsFile != "" {
 		if _, err := os.Stat(cfg.FirebaseCredentialsFile); err != nil {
 			return Config{}, fmt.Errorf("FIREBASE_CREDENTIALS_FILE %q is not readable: %w", cfg.FirebaseCredentialsFile, err)
@@ -109,6 +132,57 @@ func Load() (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// parseCredentialsJSON accepts the service account document either raw or
+// base64 encoded, because pasting a multi-line JSON blob with an embedded
+// private key into a dashboard field mangles it in ways that are hard to see.
+// Base64 is one line and survives every UI.
+//
+// It is validated here so a bad paste fails at boot with a clear message
+// instead of an opaque SDK error on the first request. No error mentions the
+// value: it contains a private key.
+func parseCredentialsJSON(raw string) ([]byte, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+
+	document := []byte(raw)
+	if !strings.HasPrefix(raw, "{") {
+		decoded, err := base64.StdEncoding.DecodeString(raw)
+		if err != nil {
+			return nil, fmt.Errorf("FIREBASE_CREDENTIALS_JSON is neither JSON (it must start with {) nor valid base64")
+		}
+		document = decoded
+	}
+
+	var parsed struct {
+		Type        string `json:"type"`
+		ProjectID   string `json:"project_id"`
+		PrivateKey  string `json:"private_key"`
+		ClientEmail string `json:"client_email"`
+	}
+	if err := json.Unmarshal(document, &parsed); err != nil {
+		return nil, fmt.Errorf("FIREBASE_CREDENTIALS_JSON is not valid JSON: check for a truncated paste")
+	}
+
+	// The SDK only accepts a service account, so reject anything else here
+	// where the message can say why.
+	if parsed.Type != "service_account" {
+		return nil, fmt.Errorf("FIREBASE_CREDENTIALS_JSON has type %q, want service_account", parsed.Type)
+	}
+	if parsed.PrivateKey == "" || parsed.ClientEmail == "" || parsed.ProjectID == "" {
+		return nil, fmt.Errorf("FIREBASE_CREDENTIALS_JSON is missing project_id, private_key or client_email")
+	}
+
+	// A literal "\n" instead of a newline means the escaping was eaten
+	// somewhere, which the SDK reports only as a PEM parse failure.
+	if !strings.Contains(parsed.PrivateKey, "\n") {
+		return nil, fmt.Errorf("FIREBASE_CREDENTIALS_JSON private_key has no line breaks: the \\n escapes were lost, use the base64 form instead")
+	}
+
+	return document, nil
 }
 
 // parseTrustedProxies validates the CIDR list at boot, so a typo fails loudly
