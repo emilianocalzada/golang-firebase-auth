@@ -1,6 +1,6 @@
 module aislide
 
-go 1.25.0
+go 1.26.0
 
 require (
 	firebase.google.com/go/v4 v4.21.0

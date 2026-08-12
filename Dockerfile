@@ -1,4 +1,6 @@
-FROM golang:1.25-alpine AS build
+# syntax=docker/dockerfile:1
+
+FROM golang:1.26-alpine AS build
 
 # gcc and musl-dev are required: mattn/go-sqlite3 is a cgo package, so this
 # cannot be built with CGO_ENABLED=0.
@@ -8,14 +10,24 @@ WORKDIR /src
 
 # Dependencies first, so editing application code does not re-download them.
 COPY go.mod go.sum ./
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
 
 COPY . .
 
 # Statically linked, so the runtime stage needs no matching musl and the two
 # Alpine versions can drift apart freely. -trimpath keeps build paths out of
 # the binary.
-RUN CGO_ENABLED=1 GOOS=linux go build \
+#
+# The two cache mounts are what keep rebuilds short. They live on the build
+# host rather than in a layer, so they survive a deploy that invalidates every
+# layer above: /go/pkg/mod skips re-downloading modules, and /root/.cache/go-build
+# skips recompiling anything unchanged. That second one matters most here,
+# because go-sqlite3 compiles SQLite's ~250k-line C amalgamation and that is the
+# single slowest step of a cold build.
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=1 GOOS=linux go build \
     -trimpath \
     -ldflags='-s -w -extldflags "-static"' \
     -o /out/aislide .
